@@ -1,0 +1,13 @@
+.git
+.idea
+.vscode
+.env
+.env.local
+.env.*
+coverage.out
+coverage.html
+*.log
+docs/
+.github/
+README.md
+*_test.go

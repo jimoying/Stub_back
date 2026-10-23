@@ -1,0 +1,60 @@
+# Short Links Backend
+
+独立短链接服务后端，使用 Go、Gin、PostgreSQL 和 Redis。PostgreSQL 是身份、权限、短链规则与访问日志的权威存储；Redis 仅承载可过期缓存和短时限流数据；MinIO 仅保存素材对象。
+
+## 当前范围
+
+- 认证、邮箱验证、邀请码、会话、用户权限与额度管理。
+- 通用 HTTPS 短链、访问规则、规则模板、访问日志、审计日志、未知短码安全事件与访问统计。
+- 管理员登记业务桶并授予用户业务权限；MinIO 素材上传、预览、软删除、恢复和到期物理清理。
+- PostgreSQL 为业务权威数据源，Redis 仅用于短期邮件限流；MinIO 凭据只保留在服务端。
+- 接口和业务规则以产品规格 `SHORT_LINK_CONFIRMED_FEATURES.md` 为准。
+
+服务按 `transport/httpapi`、`modules/*`、`platform/*` 和 `app` 分层。HTTP Handler 负责 DTO/状态码，领域服务负责业务事务，平台包封装数据库、Redis 和 MinIO；权限由 Gin 中间件在进入业务 Handler 前实时检查。详见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
+## 本地运行
+
+1. 复制 `.env.example` 为 `.env`，调整数据库、Redis、首位管理员、SMTP 和 MinIO 配置。
+2. 启动 PostgreSQL 与 Redis。
+3. 执行 `go run ./cmd/api`。
+4. 检查 `GET /healthz` 与 `GET /readyz`。
+
+服务启动时自动应用嵌入式数据库迁移。如果库内没有管理员，会使用 `INITIAL_ADMIN_EMAIL` 与 `INITIAL_ADMIN_PASSWORD` 初始化；库内已有管理员时不会覆盖账号。
+
+## Docker Compose
+
+将 `.env.example` 复制为 `.env` 并设置强密码、两个 HMAC 密钥、邮件及 MinIO 参数。Compose 会启动 PostgreSQL、Redis 和后端；MinIO 由独立服务提供，后端应使用其容器内网地址。反向代理与后端共用的外部 Docker 网络默认是 `web_net`，部署前须确认该网络已存在；如不存在，先执行 `docker network create web_net`。
+
+```sh
+docker compose --env-file .env up -d --build
+```
+
+后端仅绑定到宿主机 `127.0.0.1:${HTTP_PORT}`，可由 Nginx 反向代理到 `short-links-back:8080`（Nginx 与后端需加入同一代理网络）。上传文件会暂存到容器 `/tmp`；Compose 默认给该临时目录 256 MB，若管理员提高单文件上限或并发上传量，应相应调整该大小。
+
+## GitHub Actions 与镜像部署
+
+项目根目录的 [`../.github/workflows/backend.yml`](../.github/workflows/backend.yml) 会在后端相关 PR/推送上执行格式检查、`go vet`、单元测试和容器构建。默认分支推送及 `v*` 标签通过检查后，会发布 `linux/amd64`、`linux/arm64` 镜像到 `ghcr.io/<GitHub组织或用户名>/short-links-back`；PR 只构建、不推送镜像。手动运行工作流时，需显式勾选 `publish_image` 才会发布。
+
+生产部署时，在服务器的 `.env` 中将 `SHORT_LINKS_IMAGE` 设置为 `ghcr.io/<GitHub组织或用户名>/short-links-back:latest`，然后拉取并启动已发布镜像：
+
+```sh
+docker compose --env-file .env pull short-links-back
+docker compose --env-file .env up -d --no-build
+```
+
+首次发布后，需在 GitHub 的 Container package 设置中将镜像设为公开；若保持私有，部署服务器必须先使用具有 `read:packages` 权限的凭据登录 GHCR。其他服务仍需按前文加入 `web_net` 和 `minio_net` 网络。
+
+首期无需 Kafka：数据库事务承载需要强一致的账号、短链、额度和访问记录；Redis 已覆盖当前短期限流场景；MinIO 负责大对象。只有后续出现独立异步消费、削峰或跨服务事件订阅需求并达到实际吞吐量时，再引入消息队列。
+
+## 主要接口域
+
+详见 [`docs/API.md`](docs/API.md)，包括各接口的请求与响应 DTO、权限和状态变化。
+
+- `/api/v1/auth/*`、`/api/v1/me/*`、`/api/v1/invites`：账号与会话。
+- `/api/v1/links`、`/api/v1/rule-templates`：短链与规则模板。
+- `/api/v1/assets`：MinIO 素材。
+- `/api/v1/logs/*`、`/api/v1/analytics/*`：日志与访问统计。
+- `/api/v1/admin/*`：管理员设置、用户、额度、权限、业务和安全事件。
+- `/r/{code}`：匿名浏览器短链入口；规则通过后返回 HTTP 302。
+
+Compose 使用三个独立网络：数据库网络仅限后端、PostgreSQL 与 Redis；`web_net` 供反向代理访问后端；`minio_net` 供后端通过内网连接独立部署的 MinIO。部署前应确保两个外部网络存在，并将 MinIO 容器接入 `minio_net`。
