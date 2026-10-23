@@ -33,7 +33,7 @@ docker compose --env-file .env up -d --build
 
 ## GitHub Actions 与镜像部署
 
-项目根目录的 [`../.github/workflows/backend.yml`](../.github/workflows/backend.yml) 会在后端相关 PR/推送上执行格式检查、`go vet`、单元测试和容器构建。默认分支推送及 `v*` 标签通过检查后，会发布 `linux/amd64`、`linux/arm64` 镜像到 `ghcr.io/<GitHub组织或用户名>/short-links-back`；PR 只构建、不推送镜像。手动运行工作流时，需显式勾选 `publish_image` 才会发布。
+仓库根目录的 [`.github/workflows/backend.yml`](.github/workflows/backend.yml) 会在 PR/推送上执行格式检查、`go vet`、单元测试和容器构建。默认分支推送及 `v*` 标签通过检查后，会发布 `linux/amd64`、`linux/arm64` 镜像到 `ghcr.io/<GitHub组织或用户名>/short-links-back`；PR 只构建、不推送镜像。手动运行工作流时，需显式勾选 `publish_image` 才会发布。
 
 生产部署时，在服务器的 `.env` 中将 `SHORT_LINKS_IMAGE` 设置为 `ghcr.io/<GitHub组织或用户名>/short-links-back:latest`，然后拉取并启动已发布镜像：
 
