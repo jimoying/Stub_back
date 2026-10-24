@@ -1,6 +1,9 @@
 package links
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Problem struct {
 	Status  int
@@ -11,6 +14,8 @@ type Problem struct {
 func (p *Problem) Error() string { return p.Message }
 
 type CreateRequest struct {
+	Title          string          `json:"title,omitempty"`
+	Tags           []string        `json:"tags,omitempty"`
 	Code           string          `json:"code,omitempty"`
 	Target         TargetInput     `json:"target"`
 	ExpiresAt      *time.Time      `json:"expiresAt"`
@@ -55,6 +60,8 @@ type TemplateRef struct {
 
 type LinkDTO struct {
 	LinkID       string       `json:"linkId"`
+	Title        string       `json:"title"`
+	Tags         []string     `json:"tags"`
 	Code         string       `json:"code"`
 	URL          string       `json:"url"`
 	Target       TargetDTO    `json:"target"`
@@ -77,6 +84,8 @@ type TargetDTO struct {
 
 type CreateResponse struct {
 	LinkID       string       `json:"linkId"`
+	Title        string       `json:"title"`
+	Tags         []string     `json:"tags"`
 	Code         string       `json:"code"`
 	URL          string       `json:"url"`
 	Target       TargetDTO    `json:"target"`
@@ -87,9 +96,13 @@ type CreateResponse struct {
 
 type ListItem struct {
 	LinkID         string     `json:"linkId"`
+	Title          string     `json:"title"`
+	Tags           []string   `json:"tags"`
 	Code           string     `json:"code"`
 	URL            string     `json:"url"`
 	TargetType     string     `json:"targetType"`
+	TargetURL      string     `json:"targetUrl,omitempty"`
+	AssetID        string     `json:"assetId,omitempty"`
 	AssetSizeBytes *int64     `json:"assetSizeBytes,omitempty"`
 	Status         string     `json:"status"`
 	Availability   string     `json:"availability"`
@@ -118,6 +131,20 @@ type RenewRequest struct {
 type RotateRequest struct {
 	Strategy string `json:"strategy"`
 	Code     string `json:"code,omitempty"`
+}
+
+type UpdateMetadataRequest struct {
+	Title *string   `json:"title"`
+	Tags  *[]string `json:"tags"`
+}
+
+type UpdateRulesRequest struct {
+	ExpiresAt           json.RawMessage `json:"expiresAt,omitempty"`
+	MaxVisits           *int64          `json:"maxVisits,omitempty"`
+	AllowedIPCIDRs      *[]string       `json:"allowedIpCidrs,omitempty"`
+	RequirePassword     *bool           `json:"requirePassword,omitempty"`
+	AccessPassword      *string         `json:"accessPassword,omitempty"`
+	WrongPasswordPolicy *PasswordPolicy `json:"wrongPasswordPolicy,omitempty"`
 }
 
 type PublicResult struct {

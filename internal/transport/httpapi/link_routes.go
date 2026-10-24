@@ -99,7 +99,7 @@ func registerLinkRoutes(router *gin.Engine, deps Dependencies) {
 			return
 		}
 		filters := map[string]string{}
-		for _, key := range []string{"workspaceId", "status", "availability", "targetType", "code", "createdFrom", "createdTo"} {
+		for _, key := range []string{"workspaceId", "status", "availability", "targetType", "code", "keyword", "assetId", "createdFrom", "createdTo"} {
 			filters[key] = c.Query(key)
 		}
 		result, err := service.List(c.Request.Context(), linkActor(c), page, pageSize, filters)
@@ -111,6 +111,30 @@ func registerLinkRoutes(router *gin.Engine, deps Dependencies) {
 	})
 	api.GET("/links/:linkId", requirePermission(deps.DB, "links.read"), func(c *gin.Context) {
 		result, err := service.Get(c.Request.Context(), linkActor(c), c.Param("linkId"))
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
+	api.PATCH("/links/:linkId/metadata", requirePermission(deps.DB, "links.manage"), func(c *gin.Context) {
+		var input links.UpdateMetadataRequest
+		if !decodeJSON(c, &input) {
+			return
+		}
+		result, err := service.UpdateMetadata(c.Request.Context(), linkActor(c), c.Param("linkId"), input, linkMeta(c))
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
+	api.PATCH("/links/:linkId/rules", requirePermission(deps.DB, "links.manage"), func(c *gin.Context) {
+		var input links.UpdateRulesRequest
+		if !decodeJSON(c, &input) {
+			return
+		}
+		result, err := service.UpdateRules(c.Request.Context(), linkActor(c), c.Param("linkId"), input, linkMeta(c))
 		if err != nil {
 			writeServiceError(c, err)
 			return

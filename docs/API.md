@@ -52,13 +52,15 @@
 
 ## 短链
 
-普通用户必须具有相应 `links.*` 权限；资源范围始终从登录用户工作空间确定。短链目标创建后不可更改。
+普通用户必须具有相应 `links.*` 权限；资源范围始终从登录用户工作空间确定。短链目标创建后不可更改。第一阶段暂不实现批量创建；提醒功能安排在后续开发。
 
 | 方法与路径 | 作用 | 请求 | 成功响应 |
 | --- | --- | --- | --- |
-| `POST /links` | 创建 HTTPS URL 或素材短链 | `target`, 可选 `code`, `expiresAt`, `accessPassword`, `ruleSource` | `201`: 稳定 `linkId`、`code`、`url`、目标、规则及模板版本 |
-| `GET /links` | 查询可见短链 | `workspaceId`, `status`, `availability`, `targetType`, `code`, 创建时间筛选、分页 | 分页短链摘要 |
+| `POST /links` | 创建 HTTPS URL 或素材短链 | 可选 `title`, `tags`, `code`；`target`, `expiresAt`, `accessPassword`, `ruleSource` | `201`: 稳定 `linkId`、`title`、`tags`、`code`、`url`、目标、规则及模板版本 |
+| `GET /links` | 查询可见短链 | `workspaceId`, `status`, `availability`, `targetType`, `code`, `keyword`, `assetId`, 创建时间筛选、分页 | 分页短链摘要，含标题和标签 |
 | `GET /links/{linkId}` | 查询详情 | 路径 `linkId` | `200`: 短链 DTO |
+| `PATCH /links/{linkId}/metadata` | 修改标题和标签 | `title`, `tags` | `200`: 更新后的短链 DTO |
+| `PATCH /links/{linkId}/rules` | 修改到期时间、次数、IP 范围和口令规则 | 任一规则字段；`expiresAt:null` 表示清除到期时间 | `200`: 更新后的短链 DTO |
 | `POST /links/{linkId}/renew` | 续期并可选择保留或轮换短码 | `expiresAt`, `codeStrategy` | `200`: 当前 `linkId`, `code`, URL, `codeChanged` |
 | `POST /links/{linkId}/rotate-code` | 仅轮换短码 | `strategy`, 自定义策略时传 `code` | `200`: 新码、新 URL |
 | `POST /links/{linkId}/reset-visits` | 重置访问次数 | 无 | `200`: `visitsUsed=0`, `maxVisits`, `resetAt` |
@@ -66,6 +68,10 @@
 | `POST /links/{linkId}/enable` | 启用短链 | 无 | `200`: 状态与可用性 |
 | `GET /r/{code}` | 匿名解析短链，规则通过后 302 | 路径短码 | HTML 挑战/错误页或 `302 Location` |
 | `POST /r/{code}/password` | 提交访问口令；口令错误不消耗访问次数 | 表单 `password` | HTML 错误页或 `302 Location` |
+
+标题为可选字段，最多 120 个字符；标签可选，最多 20 个，每个最多 32 个字符。服务端会去除标签首尾空格，并按不区分大小写的方式去重。`keyword` 对标题、标签、短码和 HTTPS 目标 URL 执行不区分大小写的包含查询；`assetId` 为精确筛选。
+
+两个 `PATCH` 接口都要求 `links.manage`，并且只能操作本人工作空间内的短链。元数据请求必须同时提供 `title` 和 `tags`，允许传空字符串或空数组清空；规则请求可部分更新。规则修改保留 `LinkId`、目标、短码、累计访问次数及创建时记录的模板 ID/版本，规则仍以短链自身快照为准；每次修改写入审计日志，不记录口令明文。启用口令时可不传 `accessPassword` 以保留现有口令；从未启用状态改为启用时必须提供新口令。访问次数规则修改不会重置 `visitsUsed`。
 
 创建接口 `ruleSource` 只能选择 `{ "type": "inline", "rules": ... }` 或 `{ "type": "template", "template": { "templateId": "...", "version": 1 } }`。`maxVisits` 缺省为 `-1`，`0` 禁止访问。访问日志以短链服务实际收到的放行尝试为准，不推断 302 后的下载结果。
 

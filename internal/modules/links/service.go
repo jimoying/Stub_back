@@ -49,6 +49,8 @@ type RequestMeta struct {
 type linkRecord struct {
 	ID              uuid.UUID
 	WorkspaceID     uuid.UUID
+	Title           string
+	Tags            []string
 	TargetType      string
 	TargetURL       sql.NullString
 	AssetID         sql.NullString
@@ -77,6 +79,10 @@ func NewService(db *sql.DB, cfg config.Config, store *objectstore.Store) *Servic
 
 func (s *Service) Create(ctx context.Context, actor Actor, input CreateRequest, meta RequestMeta) (CreateResponse, error) {
 	// 1. 校验目标和短码输入；外部 URL 只允许 HTTPS，不由本服务主动抓取。
+	title, tags, err := normalizeMetadata(input.Title, input.Tags)
+	if err != nil {
+		return CreateResponse{}, err
+	}
 	code := strings.ToLower(strings.TrimSpace(input.Code))
 	if code != "" && !codePattern.MatchString(code) {
 		return CreateResponse{}, problem(422, "invalid_code", "短码格式无效")
@@ -206,11 +212,13 @@ func (s *Service) Create(ctx context.Context, actor Actor, input CreateRequest, 
 		}
 	}
 	linkID := uuid.New()
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO short_links (link_id,workspace_id,target_type,target_url,asset_id,expires_at,max_visits,allowed_ip_cidrs,require_password,password_hash,wrong_password_policy,status,template_id,template_version,created_by)
-		VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8::cidr[],$9,$10,$11::jsonb,'enabled',$12,$13,$14)`,
-		linkID, workspaceID, input.Target.Type, input.Target.URL, assetID, input.ExpiresAt, rules.MaxVisits,
-		cidrArray(rules.AllowedIPCIDRs), rules.RequirePassword, passwordHash, nullableJSON(policyJSON), nullableTemplateID(templateRef), nullableTemplateVersion(templateRef), actor.UserID); err != nil {
+	tagsJSON, _ := json.Marshal(tags)
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO short_links (link_id,workspace_id,title,tags,target_type,target_url,asset_id,expires_at,max_visits,allowed_ip_cidrs,require_password,password_hash,wrong_password_policy,status,template_id,template_version,created_by)
+		VALUES ($1,$2,$3,$4::jsonb,$5,NULLIF($6,''),$7,$8,$9,$10::cidr[],$11,$12,$13::jsonb,'enabled',$14,$15,$16)`,
+		linkID, workspaceID, title, string(tagsJSON), input.Target.Type, input.Target.URL, assetID, input.ExpiresAt, rules.MaxVisits,
+		cidrArray(rules.AllowedIPCIDRs), rules.RequirePassword, passwordHash, nullableJSON(policyJSON), nullableTemplateID(templateRef), nullableTemplateVersion(templateRef), actor.UserID)
+	if err != nil {
 		return CreateResponse{}, fmt.Errorf("创建短链记录失败: %w", err)
 	}
 	code, err = s.insertCode(ctx, tx, linkID, code)
@@ -218,7 +226,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, input CreateRequest, 
 		return CreateResponse{}, err
 	}
 	if err := audit(ctx, tx, actor.UserID, workspaceID, "link.create", "short_link", linkID.String(), meta, map[string]any{
-		"targetType": input.Target.Type, "businessId": assetBusinessID, "code": code, "expiresAt": input.ExpiresAt,
+		"title": title, "tags": tags, "targetType": input.Target.Type, "businessId": assetBusinessID, "code": code, "expiresAt": input.ExpiresAt,
 		"maxVisits": rules.MaxVisits, "requirePassword": rules.RequirePassword,
 		"templateId": nullablePublicTemplateID(templateRef), "templateVersion": nullablePublicTemplateVersion(templateRef),
 	}); err != nil {
@@ -227,7 +235,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, input CreateRequest, 
 	if err := tx.Commit(); err != nil {
 		return CreateResponse{}, err
 	}
-	return CreateResponse{LinkID: publicID("link", linkID), Code: code, URL: s.linkURL(code), Target: target, ExpiresAt: input.ExpiresAt, Rules: rules, RuleTemplate: templateRef}, nil
+	return CreateResponse{LinkID: publicID("link", linkID), Title: title, Tags: tags, Code: code, URL: s.linkURL(code), Target: target, ExpiresAt: input.ExpiresAt, Rules: rules, RuleTemplate: templateRef}, nil
 }
 
 func (s *Service) List(ctx context.Context, actor Actor, page, pageSize int, query map[string]string) (Page, error) {
@@ -257,6 +265,26 @@ func (s *Service) List(ctx context.Context, actor Actor, page, pageSize int, que
 			}
 			add(column+"=$%d", strings.ToLower(value))
 		}
+	}
+	if keyword := strings.TrimSpace(query["keyword"]); keyword != "" {
+		if len([]rune(keyword)) > 160 {
+			return Page{}, problem(422, "invalid_filter", "关键词不能超过 160 个字符")
+		}
+		args = append(args, keyword)
+		index := len(args)
+		where = append(where, fmt.Sprintf(`(
+			strpos(lower(sl.title),lower($%d))>0 OR
+			strpos(lower(COALESCE(sl.target_url,'')),lower($%d))>0 OR
+			strpos(lower(COALESCE(sc.code,'')),lower($%d))>0 OR
+			EXISTS (SELECT 1 FROM jsonb_array_elements_text(sl.tags) AS labels(value) WHERE strpos(lower(labels.value),lower($%d))>0)
+		)`, index, index, index, index))
+	}
+	if rawAssetID := strings.TrimSpace(query["assetId"]); rawAssetID != "" {
+		assetID, err := parseID("ast", rawAssetID)
+		if err != nil {
+			return Page{}, problem(422, "invalid_asset_id", "素材 ID 格式无效")
+		}
+		add("sl.asset_id=$%d", assetID)
 	}
 	if availability := query["availability"]; availability != "" {
 		availabilitySQL := "CASE WHEN sl.status='disabled' THEN 'disabled' WHEN sl.expires_at IS NOT NULL AND sl.expires_at<=now() THEN 'expired' WHEN sl.max_visits>=0 AND sl.visits_used>=sl.max_visits THEN 'visit_limit_reached' ELSE 'available' END"
@@ -289,7 +317,8 @@ func (s *Service) List(ctx context.Context, actor Actor, page, pageSize int, que
 	}
 	args = append(args, pageSize, (page-1)*pageSize)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT sl.link_id, sc.code, sl.target_type, a.size_bytes, sl.status, sl.expires_at,
+		SELECT sl.link_id, sc.code, sl.title, sl.tags::text, sl.target_type, sl.target_url, sl.asset_id,
+		       a.size_bytes, sl.status, sl.expires_at,
 		       sl.visits_used, sl.max_visits, sl.created_at,
 		       CASE WHEN sl.status='disabled' THEN 'disabled' WHEN sl.expires_at IS NOT NULL AND sl.expires_at<=now() THEN 'expired'
 		            WHEN sl.max_visits>=0 AND sl.visits_used>=sl.max_visits THEN 'visit_limit_reached' ELSE 'available' END
@@ -304,10 +333,16 @@ func (s *Service) List(ctx context.Context, actor Actor, page, pageSize int, que
 		var id uuid.UUID
 		var item ListItem
 		var code sql.NullString
+		var tagsJSON []byte
+		var targetURL, assetID sql.NullString
 		var size sql.NullInt64
 		var expires sql.NullTime
-		if err := rows.Scan(&id, &code, &item.TargetType, &size, &item.Status, &expires, &item.VisitsUsed, &item.MaxVisits, &item.CreatedAt, &item.Availability); err != nil {
+		if err := rows.Scan(&id, &code, &item.Title, &tagsJSON, &item.TargetType, &targetURL, &assetID, &size, &item.Status, &expires, &item.VisitsUsed, &item.MaxVisits, &item.CreatedAt, &item.Availability); err != nil {
 			return Page{}, err
+		}
+		item.Tags = []string{}
+		if err := json.Unmarshal(tagsJSON, &item.Tags); err != nil {
+			return Page{}, fmt.Errorf("读取短链标签失败: %w", err)
 		}
 		item.LinkID = publicID("link", id)
 		if code.Valid {
@@ -317,6 +352,14 @@ func (s *Service) List(ctx context.Context, actor Actor, page, pageSize int, que
 		if size.Valid {
 			value := size.Int64
 			item.AssetSizeBytes = &value
+		}
+		if targetURL.Valid {
+			item.TargetURL = targetURL.String
+		}
+		if assetID.Valid {
+			if parsedID, err := uuid.Parse(assetID.String); err == nil {
+				item.AssetID = publicID("ast", parsedID)
+			}
 		}
 		if expires.Valid {
 			value := expires.Time.UTC()
@@ -343,6 +386,204 @@ func (s *Service) Get(ctx context.Context, actor Actor, rawID string) (LinkDTO, 
 	}
 	if actor.Role != "admin" && r.WorkspaceID != actor.WorkspaceID {
 		return LinkDTO{}, problem(404, "link_not_found", "短链不存在或无权访问")
+	}
+	return s.dto(r), nil
+}
+
+func (s *Service) UpdateMetadata(ctx context.Context, actor Actor, rawID string, input UpdateMetadataRequest, meta RequestMeta) (LinkDTO, error) {
+	// 1. 备注与标签只更新当前短链，不允许触及目标、短码或访问规则。
+	if input.Title == nil || input.Tags == nil {
+		return LinkDTO{}, problem(422, "invalid_metadata", "title 和 tags 必须同时提供")
+	}
+	title, tags, err := normalizeMetadata(*input.Title, *input.Tags)
+	if err != nil {
+		return LinkDTO{}, err
+	}
+	id, err := parseID("link", rawID)
+	if err != nil {
+		return LinkDTO{}, problem(404, "link_not_found", "短链不存在或无权访问")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return LinkDTO{}, err
+	}
+	defer tx.Rollback()
+	r, err := s.loadLink(ctx, tx, id, true)
+	if errors.Is(err, sql.ErrNoRows) {
+		return LinkDTO{}, problem(404, "link_not_found", "短链不存在或无权访问")
+	}
+	if err != nil {
+		return LinkDTO{}, err
+	}
+	if actor.Role != "admin" && r.WorkspaceID != actor.WorkspaceID {
+		return LinkDTO{}, problem(404, "link_not_found", "短链不存在或无权访问")
+	}
+	tagsJSON, _ := json.Marshal(tags)
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `UPDATE short_links SET title=$2,tags=$3::jsonb,updated_at=$4 WHERE link_id=$1`, id, title, string(tagsJSON), now); err != nil {
+		return LinkDTO{}, err
+	}
+	if err := audit(ctx, tx, actor.UserID, r.WorkspaceID, "link.metadata.update", "short_link", id.String(), meta, map[string]any{
+		"titleBefore": r.Title, "titleAfter": title, "tagsBefore": r.Tags, "tagsAfter": tags,
+	}); err != nil {
+		return LinkDTO{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return LinkDTO{}, err
+	}
+	r.Title, r.Tags, r.UpdatedAt = title, tags, now
+	return s.dto(r), nil
+}
+
+func (s *Service) UpdateRules(ctx context.Context, actor Actor, rawID string, input UpdateRulesRequest, meta RequestMeta) (LinkDTO, error) {
+	// 1. 规则按字段合并更新；模板版本只保留为来源记录，规则值仍以短链快照为准。
+	if input.MaxVisits == nil && input.AllowedIPCIDRs == nil && input.RequirePassword == nil && input.AccessPassword == nil && input.WrongPasswordPolicy == nil && len(input.ExpiresAt) == 0 {
+		return LinkDTO{}, problem(422, "empty_update", "至少提供一个规则字段")
+	}
+	id, err := parseID("link", rawID)
+	if err != nil {
+		return LinkDTO{}, problem(404, "link_not_found", "短链不存在或无权访问")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return LinkDTO{}, err
+	}
+	defer tx.Rollback()
+	r, err := s.loadLink(ctx, tx, id, true)
+	if errors.Is(err, sql.ErrNoRows) {
+		return LinkDTO{}, problem(404, "link_not_found", "短链不存在或无权访问")
+	}
+	if err != nil {
+		return LinkDTO{}, err
+	}
+	if actor.Role != "admin" && r.WorkspaceID != actor.WorkspaceID {
+		return LinkDTO{}, problem(404, "link_not_found", "短链不存在或无权访问")
+	}
+	expiresAt := r.ExpiresAt
+	if len(input.ExpiresAt) > 0 {
+		if strings.TrimSpace(string(input.ExpiresAt)) == "null" {
+			expiresAt = sql.NullTime{}
+		} else {
+			var requested time.Time
+			if err := json.Unmarshal(input.ExpiresAt, &requested); err != nil || requested.IsZero() || !requested.After(time.Now()) {
+				return LinkDTO{}, problem(422, "invalid_expiration", "到期时间必须是合法且晚于当前时间的时间戳，或使用 null 清除到期时间")
+			}
+			expiresAt = sql.NullTime{Time: requested, Valid: true}
+		}
+	}
+
+	rules := Rules{
+		MaxVisits: r.MaxVisits, AllowedIPCIDRs: parseCIDRArray(r.IPCIDRs), RequirePassword: r.RequirePassword,
+	}
+	if len(r.PolicyJSON) > 0 {
+		_ = json.Unmarshal(r.PolicyJSON, &rules.WrongPasswordPolicy)
+	}
+	if input.MaxVisits != nil {
+		rules.MaxVisits = *input.MaxVisits
+	}
+	if input.AllowedIPCIDRs != nil {
+		rules.AllowedIPCIDRs = make([]string, 0, len(*input.AllowedIPCIDRs))
+		for _, cidr := range *input.AllowedIPCIDRs {
+			rules.AllowedIPCIDRs = append(rules.AllowedIPCIDRs, strings.TrimSpace(cidr))
+		}
+	}
+	if input.RequirePassword != nil {
+		rules.RequirePassword = *input.RequirePassword
+	}
+	if input.WrongPasswordPolicy != nil {
+		rules.WrongPasswordPolicy = input.WrongPasswordPolicy
+	} else if rules.RequirePassword && rules.WrongPasswordPolicy == nil {
+		rules.WrongPasswordPolicy = &PasswordPolicy{Strategy: "fixed_cooldown"}
+	}
+	if !rules.RequirePassword && (input.AccessPassword != nil || input.WrongPasswordPolicy != nil) {
+		return LinkDTO{}, problem(422, "unexpected_password_rule", "关闭访问口令时不能更新口令或错误策略")
+	}
+	if !rules.RequirePassword {
+		rules.WrongPasswordPolicy = nil
+	}
+	if err := ValidateRules(rules); err != nil {
+		return LinkDTO{}, err
+	}
+
+	passwordHash := any(nil)
+	if r.PasswordHash.Valid {
+		passwordHash = r.PasswordHash.String
+	}
+	if input.AccessPassword != nil {
+		if !rules.RequirePassword || strings.TrimSpace(*input.AccessPassword) == "" {
+			return LinkDTO{}, problem(422, "invalid_access_password", "启用口令保护时，新口令不能为空")
+		}
+		hash, err := auth.HashPassword(*input.AccessPassword)
+		if err != nil {
+			return LinkDTO{}, err
+		}
+		passwordHash = hash
+	}
+	if !rules.RequirePassword {
+		passwordHash = nil
+	}
+	if rules.RequirePassword && passwordHash == nil {
+		return LinkDTO{}, problem(422, "access_password_required", "启用口令保护时必须提供访问口令")
+	}
+	var policyValue any
+	var policyJSON []byte
+	if rules.RequirePassword {
+		policyJSON, err = json.Marshal(rules.WrongPasswordPolicy)
+		if err != nil {
+			return LinkDTO{}, err
+		}
+		policyValue = string(policyJSON)
+	}
+	oldPolicy := ""
+	if r.RequirePassword && len(r.PolicyJSON) > 0 {
+		var previous PasswordPolicy
+		if json.Unmarshal(r.PolicyJSON, &previous) == nil {
+			oldPolicy = previous.Strategy
+		}
+	}
+	newPolicy := ""
+	if rules.WrongPasswordPolicy != nil {
+		newPolicy = rules.WrongPasswordPolicy.Strategy
+	}
+	var expiresBefore, expiresAfter *time.Time
+	if r.ExpiresAt.Valid {
+		value := r.ExpiresAt.Time.UTC()
+		expiresBefore = &value
+	}
+	if expiresAt.Valid {
+		value := expiresAt.Time.UTC()
+		expiresAfter = &value
+	}
+	now := time.Now().UTC()
+	var expiresValue any
+	if expiresAt.Valid {
+		expiresValue = expiresAt.Time
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE short_links SET expires_at=$2,max_visits=$3,allowed_ip_cidrs=$4::cidr[],require_password=$5,password_hash=$6,wrong_password_policy=$7::jsonb,updated_at=$8 WHERE link_id=$1`, id, expiresValue, rules.MaxVisits, cidrArray(rules.AllowedIPCIDRs), rules.RequirePassword, passwordHash, policyValue, now); err != nil {
+		return LinkDTO{}, err
+	}
+	if err := audit(ctx, tx, actor.UserID, r.WorkspaceID, "link.rules.update", "short_link", id.String(), meta, map[string]any{
+		"expiresAtBefore": expiresBefore, "expiresAtAfter": expiresAfter,
+		"maxVisitsBefore": r.MaxVisits, "maxVisitsAfter": rules.MaxVisits,
+		"allowedIpCidrsBefore": parseCIDRArray(r.IPCIDRs), "allowedIpCidrsAfter": rules.AllowedIPCIDRs,
+		"requirePasswordBefore": r.RequirePassword, "requirePasswordAfter": rules.RequirePassword,
+		"wrongPasswordStrategyBefore": oldPolicy, "wrongPasswordStrategyAfter": newPolicy,
+	}); err != nil {
+		return LinkDTO{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return LinkDTO{}, err
+	}
+	r.ExpiresAt = expiresAt
+	r.MaxVisits = rules.MaxVisits
+	r.IPCIDRs = cidrArray(rules.AllowedIPCIDRs)
+	r.RequirePassword = rules.RequirePassword
+	r.PolicyJSON = policyJSON
+	r.UpdatedAt = now
+	if rules.RequirePassword {
+		r.PasswordHash = sql.NullString{String: passwordHash.(string), Valid: true}
+	} else {
+		r.PasswordHash = sql.NullString{}
 	}
 	return s.dto(r), nil
 }
@@ -641,7 +882,12 @@ func (s *Service) loadLink(ctx context.Context, q interface {
 		suffix = " FOR UPDATE OF sl"
 	}
 	var r linkRecord
-	err := q.QueryRowContext(ctx, `SELECT sl.link_id,sl.workspace_id,sl.target_type,sl.target_url,sl.asset_id,a.size_bytes,a.bucket,a.object_key,sl.expires_at,sl.max_visits,sl.visits_used,sl.allowed_ip_cidrs::text,sl.require_password,sl.password_hash,sl.wrong_password_policy,sl.status,sl.template_id,sl.template_version,sc.code,sc.status,sl.created_at,sl.updated_at FROM short_links sl LEFT JOIN assets a ON a.asset_id=sl.asset_id LEFT JOIN short_link_codes sc ON sc.link_id=sl.link_id AND sc.status='active' WHERE sl.link_id=$1`+suffix, id).Scan(&r.ID, &r.WorkspaceID, &r.TargetType, &r.TargetURL, &r.AssetID, &r.AssetSize, &r.Bucket, &r.ObjectKey, &r.ExpiresAt, &r.MaxVisits, &r.VisitsUsed, &r.IPCIDRs, &r.RequirePassword, &r.PasswordHash, &r.PolicyJSON, &r.Status, &r.TemplateID, &r.TemplateVersion, &r.Code, &r.CodeStatus, &r.CreatedAt, &r.UpdatedAt)
+	var tagsJSON []byte
+	err := q.QueryRowContext(ctx, `SELECT sl.link_id,sl.workspace_id,sl.target_type,sl.target_url,sl.asset_id,a.size_bytes,a.bucket,a.object_key,sl.expires_at,sl.max_visits,sl.visits_used,sl.allowed_ip_cidrs::text,sl.require_password,sl.password_hash,sl.wrong_password_policy,sl.status,sl.template_id,sl.template_version,sc.code,sc.status,sl.created_at,sl.updated_at,sl.title,sl.tags::text FROM short_links sl LEFT JOIN assets a ON a.asset_id=sl.asset_id LEFT JOIN short_link_codes sc ON sc.link_id=sl.link_id AND sc.status='active' WHERE sl.link_id=$1`+suffix, id).Scan(&r.ID, &r.WorkspaceID, &r.TargetType, &r.TargetURL, &r.AssetID, &r.AssetSize, &r.Bucket, &r.ObjectKey, &r.ExpiresAt, &r.MaxVisits, &r.VisitsUsed, &r.IPCIDRs, &r.RequirePassword, &r.PasswordHash, &r.PolicyJSON, &r.Status, &r.TemplateID, &r.TemplateVersion, &r.Code, &r.CodeStatus, &r.CreatedAt, &r.UpdatedAt, &r.Title, &tagsJSON)
+	if err == nil {
+		r.Tags = []string{}
+		err = json.Unmarshal(tagsJSON, &r.Tags)
+	}
 	return r, err
 }
 
@@ -680,7 +926,7 @@ func (s *Service) dto(r linkRecord) LinkDTO {
 	if r.Code.Valid {
 		code = r.Code.String
 	}
-	return LinkDTO{LinkID: publicID("link", r.ID), Code: code, URL: s.linkURL(code), Target: target, Status: r.Status, Availability: availability(r), Rules: rules, ExpiresAt: expires, VisitsUsed: r.VisitsUsed, RuleTemplate: ref, CreatedAt: r.CreatedAt.UTC(), UpdatedAt: r.UpdatedAt.UTC()}
+	return LinkDTO{LinkID: publicID("link", r.ID), Title: r.Title, Tags: r.Tags, Code: code, URL: s.linkURL(code), Target: target, Status: r.Status, Availability: availability(r), Rules: rules, ExpiresAt: expires, VisitsUsed: r.VisitsUsed, RuleTemplate: ref, CreatedAt: r.CreatedAt.UTC(), UpdatedAt: r.UpdatedAt.UTC()}
 }
 
 func (s *Service) Access(ctx context.Context, rawCode string, meta RequestMeta, password string, submit bool) (PublicResult, error) {
@@ -969,6 +1215,36 @@ func parseCIDRArray(raw string) []string {
 	}
 	return values
 }
+
+func normalizeMetadata(title string, tags []string) (string, []string, error) {
+	// 1. 限制展示字段长度，并按不区分大小写去重标签。
+	title = strings.TrimSpace(title)
+	if len([]rune(title)) > 120 {
+		return "", nil, problem(422, "invalid_metadata", "标题不能超过 120 个字符")
+	}
+	if len(tags) > 20 {
+		return "", nil, problem(422, "invalid_metadata", "每条短链最多添加 20 个标签")
+	}
+	normalized := make([]string, 0, len(tags))
+	seen := make(map[string]struct{}, len(tags))
+	for _, raw := range tags {
+		tag := strings.TrimSpace(raw)
+		if tag == "" {
+			continue
+		}
+		if len([]rune(tag)) > 32 {
+			return "", nil, problem(422, "invalid_metadata", "每个标签不能超过 32 个字符")
+		}
+		key := strings.ToLower(tag)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, tag)
+	}
+	return title, normalized, nil
+}
+
 func cidrArray(values []string) string {
 	if len(values) == 0 {
 		return "{}"

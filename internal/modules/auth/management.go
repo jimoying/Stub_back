@@ -107,7 +107,7 @@ var permissionCatalog = []PermissionCatalogItem{
 	{Code: "links.read", Name: "查看短链", Description: "查询本人工作空间内短链列表和详情"},
 	{Code: "links.create_url", Name: "创建 URL 短链", Description: "创建 HTTPS URL 目标短链"},
 	{Code: "links.create_asset", Name: "创建素材短链", Description: "为本人有权访问的 MinIO 素材创建短链"},
-	{Code: "links.manage", Name: "管理短链", Description: "续期、轮换短码、启用或停用本人短链"},
+	{Code: "links.manage", Name: "管理短链", Description: "编辑标题、标签和访问规则，续期、轮换短码及启停本人短链"},
 	{Code: "links.reset_visits", Name: "重置访问次数", Description: "重置本人短链的访问次数"},
 	{Code: "assets.read", Name: "查看素材", Description: "查询、预览或获取本人有权访问的素材"},
 	{Code: "assets.upload", Name: "上传素材", Description: "上传 MinIO 素材"},
