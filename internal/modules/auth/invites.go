@@ -290,3 +290,12 @@ func (s *Service) RevokeUnusedInvites(ctx context.Context, actorID uuid.UUID, us
 	}
 	return map[string]any{"revokedCount": len(items), "revokedAt": time.Now().UTC()}, nil
 }
+
+// 1. 解析带资源前缀的公开 ID，并校验其 UUID 部分。
+func parseID(prefix, value string) (uuid.UUID, error) {
+	trimmed, ok := strings.CutPrefix(value, prefix+"_")
+	if !ok {
+		return uuid.Nil, fmt.Errorf("invalid %s id", prefix)
+	}
+	return uuid.Parse(trimmed)
+}
