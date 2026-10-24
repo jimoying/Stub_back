@@ -462,7 +462,7 @@ func lockTemplate(ctx context.Context, tx *sql.Tx, actor Actor, id uuid.UUID) (l
 	return t, err
 }
 
-func writeAudit(ctx context.Context, tx *sql.Tx, actor, workspace, resource uuid.UUID, action string, meta Meta, details ...map[string]any) error {
+func writeAudit(ctx context.Context, tx *sql.Tx, actor, workspace uuid.UUID, action string, resource uuid.UUID, meta Meta, details ...map[string]any) error {
 	// 1. 模板审计只保存名称、版本与状态摘要，不保存规则正文。
 	raw := []byte(`{}`)
 	if len(details) > 0 && details[0] != nil {

@@ -294,7 +294,7 @@ func (s *Service) List(ctx context.Context, actor Actor, page, pageSize int, que
 		       CASE WHEN sl.status='disabled' THEN 'disabled' WHEN sl.expires_at IS NOT NULL AND sl.expires_at<=now() THEN 'expired'
 		            WHEN sl.max_visits>=0 AND sl.visits_used>=sl.max_visits THEN 'visit_limit_reached' ELSE 'available' END
 		FROM short_links sl LEFT JOIN short_link_codes sc ON sc.link_id=sl.link_id AND sc.status='active'
-		LEFT JOIN assets a ON a.asset_id=sl.asset_id WHERE `+filter+fmt(" ORDER BY sl.created_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args)), args...)
+		LEFT JOIN assets a ON a.asset_id=sl.asset_id WHERE `+filter+fmt.Sprintf(" ORDER BY sl.created_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args)), args...)
 	if err != nil {
 		return Page{}, err
 	}

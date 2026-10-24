@@ -326,7 +326,7 @@ func (s *Service) AdminUsers(ctx context.Context, query, role string, page, page
 		return AdminUsersPage{}, err
 	}
 	args = append(args, pageSize, (page-1)*pageSize)
-	rows, err := s.db.QueryContext(ctx, `SELECT u.user_id,u.email,u.role,u.invited_by_user_id,u.email_verified_at,u.created_at,u.default_workspace_id,u.storage_quota_bytes,u.storage_used_bytes,u.url_link_quota,u.minio_asset_link_quota,(SELECT count(*) FROM short_links l WHERE l.created_by=u.user_id AND l.target_type='url'),(SELECT count(*) FROM short_links l WHERE l.created_by=u.user_id AND l.target_type='minio_asset'),(SELECT count(*) FROM user_permissions p WHERE p.user_id=u.user_id AND p.granted_at IS NOT NULL AND p.revoked_at IS NULL),(SELECT count(*) FROM user_business_access b WHERE b.user_id=u.user_id AND b.revoked_at IS NULL) FROM users u WHERE `+filter+fmt(" ORDER BY u.created_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args)), args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT u.user_id,u.email,u.role,u.invited_by_user_id,u.email_verified_at,u.created_at,u.default_workspace_id,u.storage_quota_bytes,u.storage_used_bytes,u.url_link_quota,u.minio_asset_link_quota,(SELECT count(*) FROM short_links l WHERE l.created_by=u.user_id AND l.target_type='url'),(SELECT count(*) FROM short_links l WHERE l.created_by=u.user_id AND l.target_type='minio_asset'),(SELECT count(*) FROM user_permissions p WHERE p.user_id=u.user_id AND p.granted_at IS NOT NULL AND p.revoked_at IS NULL),(SELECT count(*) FROM user_business_access b WHERE b.user_id=u.user_id AND b.revoked_at IS NULL) FROM users u WHERE `+filter+fmt.Sprintf(" ORDER BY u.created_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args)), args...)
 	if err != nil {
 		return AdminUsersPage{}, err
 	}
