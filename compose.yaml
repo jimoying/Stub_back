@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql/data
     networks:
       - database
     healthcheck:
@@ -24,7 +24,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
     volumes:
-      - redis-data:/data
+      - ./data/redis:/data
     networks:
       - database
     healthcheck:
@@ -35,6 +35,27 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  minio:
+    image: ${MINIO_IMAGE:?Set MINIO_IMAGE in .env}
+    container_name: minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      - ./data/minio:/data
+    ports:
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    expose:
+      - "9000"
+      - "9001"
+    networks:
+      - object-store
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
   short-links-back:
     build:
       context: .
@@ -43,15 +64,29 @@ services:
     container_name: short-links-back
     restart: unless-stopped
     init: true
-    env_file:
-      - .env
     environment:
       APP_ENV: production
       HTTP_ADDR: :8080
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL in .env}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       REDIS_URL: redis://redis:6379/0
-    ports:
-      - "127.0.0.1:${HTTP_PORT:-8588}:8080"
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      EMAIL_CODE_HMAC_KEY: ${EMAIL_CODE_HMAC_KEY:?Set EMAIL_CODE_HMAC_KEY in .env}
+      SHORT_CODE_HMAC_KEY: ${SHORT_CODE_HMAC_KEY:?Set SHORT_CODE_HMAC_KEY in .env}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_TLS_MODE: ${SMTP_TLS_MODE:-starttls}
+      MINIO_INTERNAL_ENDPOINT: ${MINIO_INTERNAL_ENDPOINT:-minio:9000}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:?Set MINIO_PUBLIC_ENDPOINT in .env}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in .env}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in .env}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
     networks:
       - proxy
       - database
@@ -61,6 +96,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_started
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
@@ -75,10 +112,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-
-volumes:
-  postgres-data:
-  redis-data:
 
 networks:
   proxy:

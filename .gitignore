@@ -2,5 +2,6 @@
 .env.local
 /bin/
 /tmp/
+/data/
 /coverage.out
 /coverage.html

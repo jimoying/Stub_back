@@ -23,13 +23,13 @@
 
 ## Docker Compose
 
-将 `.env.example` 复制为 `.env` 并设置强密码、两个 HMAC 密钥、邮件及 MinIO 参数。Compose 会启动 PostgreSQL、Redis 和后端；MinIO 由独立服务提供，后端应使用其容器内网地址。反向代理与后端共用的外部 Docker 网络默认是 `web_net`，部署前须确认该网络已存在；如不存在，先执行 `docker network create web_net`。
+将 `.env.example` 复制为 `.env` 并设置强密码、两个 HMAC 密钥、邮件及 MinIO 参数。Compose 会启动 PostgreSQL、Redis、MinIO 和后端。PostgreSQL、Redis、MinIO 数据分别绑定到 Compose 文件目录下的 `data/postgres`、`data/redis`、`data/minio`；例如部署目录为 `/application/stub` 时，数据位于 `/application/stub/data/`，迁移时需连同该目录一起备份。MinIO 控制台只绑定宿主机 `127.0.0.1`，建议通过 SSH 隧道管理。MinIO root 凭据只供 MinIO 容器使用；启动后需创建业务桶和独立的后端应用用户，并将该用户凭据填入 `MINIO_ACCESS_KEY`、`MINIO_SECRET_KEY`，不要让后端使用 root 凭据。反向代理需加入外部 `web_net` 和 `minio_net`，部署前须确认两个网络已存在。
 
 ```sh
 docker compose --env-file .env up -d --build
 ```
 
-后端仅绑定到宿主机 `127.0.0.1:${HTTP_PORT}`，可由 Nginx 反向代理到 `short-links-back:8080`（Nginx 与后端需加入同一代理网络）。上传文件会暂存到容器 `/tmp`；Compose 默认给该临时目录 256 MB，若管理员提高单文件上限或并发上传量，应相应调整该大小。
+后端不发布宿主机端口，由 Nginx 通过 `web_net` 反向代理到 `short-links-back:8080`。MinIO S3 API 通过 `minio_net` 提供给后端及 Nginx；控制台端口默认仅监听宿主机 `127.0.0.1:9001`。上传文件会暂存到后端容器 `/tmp`；Compose 默认给该临时目录 256 MB，若管理员提高单文件上限或并发上传量，应相应调整该大小。
 
 ## GitHub Actions 与镜像部署
 
@@ -38,7 +38,7 @@ docker compose --env-file .env up -d --build
 生产部署时，在服务器的 `.env` 中将 `SHORT_LINKS_IMAGE` 设置为 `ghcr.io/<GitHub组织或用户名>/short-links-back:latest`，然后拉取并启动已发布镜像：
 
 ```sh
-docker compose --env-file .env pull short-links-back
+docker compose --env-file .env pull
 docker compose --env-file .env up -d --no-build
 ```
 
@@ -57,4 +57,4 @@ docker compose --env-file .env up -d --no-build
 - `/api/v1/admin/*`：管理员设置、用户、额度、权限、业务和安全事件。
 - `/r/{code}`：匿名浏览器短链入口；规则通过后返回 HTTP 302。
 
-Compose 使用三个独立网络：数据库网络仅限后端、PostgreSQL 与 Redis；`web_net` 供反向代理访问后端；`minio_net` 供后端通过内网连接独立部署的 MinIO。部署前应确保两个外部网络存在，并将 MinIO 容器接入 `minio_net`。
+Compose 使用三个独立网络：数据库网络仅限后端、PostgreSQL 与 Redis；`web_net` 供反向代理访问后端；`minio_net` 供后端、Nginx 与 MinIO 通信。部署前应确保 `web_net`、`minio_net` 两个外部网络存在。
